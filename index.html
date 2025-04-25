@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8">
+  <title>Organizador de KML por Bairro</title>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.7.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tmcw/togeojson@4.0.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xml-js@1.6.11/dist/xml-js.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { font-family: sans-serif; margin: 0; }
+    #map { height: 70vh; width: 100%; }
+    #interface { padding: 10px; }
+    input[type="file"] { margin-bottom: 10px; }
+    .btn { padding: 10px; background: #0077cc; color: white; border: none; cursor: pointer; }
+    .btn:hover { background: #005fa3; }
+  </style>
+</head>
+<body>
+  <div id="interface">
+    <h2>Organizador de KML por Bairro</h2>
+    <input type="file" id="kmlInput" accept=".kml" />
+    <button class="btn" onclick="processKML()">Reorganizar e Exportar</button>
+    <a id="downloadLink" style="display:none; margin-left:20px;">Baixar KML Reorganizado</a>
+  </div>
+  <div id="map"></div>
+
+  <script>
+    let map = L.map('map').setView([-15.78, -47.93], 4);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    let placemarks = [];
+    let bairros = {};
+
+    async function reverseGeocode(lat, lon) {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
+      const response = await fetch(url, { headers: { 'User-Agent': 'KML-Bairro-App' } });
+      const data = await response.json();
+      const bairro = data.address.suburb || data.address.neighbourhood || data.address.city_district || "Desconhecido";
+      return bairro;
+    }
+
+    function downloadKML(kml) {
+      const blob = new Blob([kml], { type: 'application/vnd.google-earth.kml+xml' });
+      const url = URL.createObjectURL(blob);
+      const link = document.getElementById('downloadLink');
+      link.href = url;
+      link.download = 'kml_reorganizado.kml';
+      link.textContent = '⬇ Baixar Arquivo';
+      link.style.display = 'inline-block';
+    }
+
+    async function processKML() {
+      const file = document.getElementById('kmlInput').files[0];
+      if (!file) return alert("Escolha um arquivo KML primeiro.");
+      const text = await file.text();
+      const kmlJson = xmljs.xml2js(text, { compact: true });
+
+      // Limpa camadas anteriores
+      map.eachLayer(layer => { if (layer._url === undefined) map.removeLayer(layer); });
+
+      placemarks = [];
+      bairros = {};
+
+      const placemarkList = kmlJson.kml.Document.Placemark || kmlJson.kml.Document.Folder?.Placemark;
+      if (!placemarkList) return alert("Nenhum placemark encontrado.");
+
+      for (const pm of placemarkList) {
+        const name = pm.name?._text || "Sem nome";
+        const coordStr = pm.Point?.coordinates?._text;
+        if (!coordStr) continue;
+
+        const [lon, lat] = coordStr.split(',').map(Number);
+        const bairro = await reverseGeocode(lat, lon);
+
+        bairros[bairro] = bairros[bairro] || [];
+        bairros[bairro].push({ name, lat, lon });
+
+        L.marker([lat, lon]).addTo(map).bindPopup(`<b>${name}</b><br>${bairro}`);
+        await new Promise(r => setTimeout(r, 1000)); // delay para Nominatim
+      }
+
+      // Gera novo KML
+      const doc = { _declaration: { _attributes: { version: "1.0", encoding: "UTF-8" } },
+        kml: {
+          _attributes: { xmlns: "http://www.opengis.net/kml/2.2" },
+          Document: {
+            name: { _text: "Placemarks Agrupados por Bairro" },
+            Folder: []
+          }
+        }
+      };
+
+      // Pasta resumo
+      const resumo = {
+        name: { _text: "Resumo dos Bairros" },
+        Placemark: Object.entries(bairros).sort((a,b) => b[1].length - a[1].length).map(([bairro, pontos]) => ({
+          name: { _text: `${bairro} (${pontos.length})` }
+        }))
+      };
+      doc.kml.Document.Folder.push(resumo);
+
+      for (const [bairro, pontos] of Object.entries(bairros).sort((a,b) => b[1].length - a[1].length)) {
+        const folder = {
+          name: { _text: `${bairro} (${pontos.length})` },
+          Placemark: pontos.map(p => ({
+            name: { _text: p.name },
+            Point: { coordinates: { _text: `${p.lon},${p.lat},0` } }
+          }))
+        };
+        doc.kml.Document.Folder.push(folder);
+      }
+
+      const kml = xmljs.js2xml(doc, { compact: true, spaces: 2 });
+      downloadKML(kml);
+    }
+  </script>
+</body>
+</html>
